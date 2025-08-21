@@ -1,9 +1,15 @@
+# ================================
+# Docker Wyze Bridge w/ Intel VAAPI + QSV Support
+# ================================
 ARG BUILD
 ARG BUILD_DATE
 ARG GITHUB_SHA
 
 FROM python:3.13-slim-bookworm AS base
 
+# ================================
+# Builder Stage
+# ================================
 FROM base AS builder
 ARG BUILD_DATE
 
@@ -15,34 +21,61 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         build-essential \
         curl \
         gcc \
-        libffi-dev \
+        git \
+        yasm \
+        nasm \
+        pkg-config \
+        libx264-dev \
+        libx265-dev \
+        libvpx-dev \
+        libfdk-aac-dev \
+        libopus-dev \
+        libdrm-dev \
+        libva-dev \
+        intel-media-va-driver-non-free \
         tar; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
+# Copy app code into build
 COPY /app/ /build/app/
-
 RUN chmod +x /build/app/run
 
+# Install Python requirements
 RUN --mount=type=cache,target=/root/.cache/pip \
     set -eux; pip3 install --disable-pip-version-check --prefix=/build/usr/local -r /build/app/requirements.txt
 
+# Build ffmpeg with VAAPI + QSV
+RUN git clone --depth=1 https://github.com/FFmpeg/FFmpeg.git /ffmpeg && \
+    cd /ffmpeg && \
+    ./configure \
+      --prefix=/usr/local \
+      --enable-gpl \
+      --enable-libx264 \
+      --enable-libx265 \
+      --enable-libvpx \
+      --enable-libfdk-aac \
+      --enable-libopus \
+      --enable-vaapi \
+      --enable-libmfx \
+      --enable-nonfree \
+      --extra-libs="-lpthread -lm" && \
+    make -j$(nproc) && \
+    make install && \
+    rm -rf /ffmpeg
+
+# Build MediaMTX and finalize
 RUN set -eux; \
     echo "BUILDING IMAGE FOR $(uname -m)";\
     if [ "$(uname -m)" = "armv7l" ]; then \
-        TARGETARCH=arm; FFMPEG_ARCH=arm32v7; MTX_ARCH=armv7; \
+        TARGETARCH=arm; MTX_ARCH=armv7; \
     elif [ "$(uname -m)" = "aarch64" ]; then \
-        TARGETARCH=arm64; FFMPEG_ARCH=aarch64; MTX_ARCH=arm64; \
+        TARGETARCH=arm64; MTX_ARCH=arm64; \
     else \
-        TARGETARCH=amd64; FFMPEG_ARCH=x86_64; MTX_ARCH=amd64; \
+        TARGETARCH=amd64; MTX_ARCH=amd64; \
     fi; \
     cd /build; \
     . app/.env; \
-    mkdir -p tokens; \
-    curl -fsSL https://github.com/homebridge/ffmpeg-for-homebridge/releases/latest/download/ffmpeg-alpine-${FFMPEG_ARCH}.tar.gz -o ffmpeg.tar.gz; \
-    tar tzf ffmpeg.tar.gz || (echo "Invalid ffmpeg tarball for ${FFMPEG_ARCH}" && exit 1); \
-    tar xzf ffmpeg.tar.gz -C . ;\
-    rm ffmpeg.tar.gz; \
     curl -fsSL https://github.com/bluenviron/mediamtx/releases/download/v${MTX_TAG}/mediamtx_v${MTX_TAG}_linux_${MTX_ARCH}.tar.gz -o mediamtx.tar.gz; \
     tar tzf mediamtx.tar.gz || (echo "Invalid mediamtx tarball for ${MTX_ARCH}" && exit 1); \
     tar xzf mediamtx.tar.gz -C app; \
@@ -54,6 +87,9 @@ RUN set -eux; \
         else echo BUILD_DATE=${BUILD_DATE} > .build_date; \
     fi;
 
+# ================================
+# Final Runtime Image
+# ================================
 FROM base
 ARG BUILD
 ARG GITHUB_SHA
@@ -61,26 +97,34 @@ ARG BUILD_DATE
 ARG BUILD_VERSION
 
 RUN set -eux; \
-    rm /var/log/*.log ; \
-    rm -rf /var/log/apt ;
+    rm -rf /var/log/* /var/lib/apt/lists/*
 
 COPY --from=builder /build /
+COPY --from=builder /usr/local /usr/local
 
-ENV PYTHONUNBUFFERED=1 FLASK_APP=frontend BUILD=$BUILD BUILD_VERSION=$BUILD_VERSION BUILD_DATE=$BUILD_DATE GITHUB_SHA=$GITHUB_SHA FLASK_ENV=production FLASK_DEBUG=0
+ENV PYTHONUNBUFFERED=1 \
+    FLASK_APP=frontend \
+    BUILD=$BUILD \
+    BUILD_VERSION=$BUILD_VERSION \
+    BUILD_DATE=$BUILD_DATE \
+    GITHUB_SHA=$GITHUB_SHA \
+    FLASK_ENV=production \
+    FLASK_DEBUG=0
+
 WORKDIR /app
 ENTRYPOINT [ "/app/run" ]
 
 LABEL \
-    io.hass.name="Docker Wyze Bridge for Home Assistant" \
-    io.hass.description="Bridges Wyze Cameras into Home Assistant using MediaMTX in Docker container" \
+    io.hass.name="Docker Wyze Bridge (Intel QSV + VAAPI)" \
+    io.hass.description="Bridges Wyze Cameras into Home Assistant with Intel VAAPI/QSV ffmpeg" \
     io.hass.type="addon" \
     io.hass.version=${BUILD_VERSION} \
-    maintainer="Marc Brooks <idisposable@gmail.com>" \
-    org.label-schema.name="Docker Wyze Bridge HA" \
-    org.label-schema.description="Docker Wyze Bridge for Home Assistant" \
+    maintainer="Bobby McMillan <appstatefan01@gmail.com>" \
+    org.label-schema.name="Docker Wyze Bridge" \
+    org.label-schema.description="Wyze Bridge w/ Intel VAAPI + QSV ffmpeg" \
     org.label-schema.build-date=${BUILD_DATE} \
     org.label-schema.schema-version="1.0" \
-    org.label-schema.usage="https://github.com/IDisposable/docker-wyze-bridge/blob/main/README.md" \
+    org.label-schema.usage="https://github.com/appstatefan01/docker-wyze-bridge" \
     org.label-schema.vcs-ref=${GITHUB_SHA} \
-    org.label-schema.vcs-url="https://github.com/IDisposable/docker-wyze-bridge/" \
-    org.label-schema.vendor="HomeAssistant add-ons by Marc Brooks"
+    org.label-schema.vcs-url="https://github.com/appstatefan01/docker-wyze-bridge" \
+    org.label-schema.vendor="Custom Build"
