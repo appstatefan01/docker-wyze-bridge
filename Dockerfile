@@ -49,7 +49,8 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-RUN git clone https://github.com/appstatefan01/docker-wyze-bridge.git /app
+# 👇 Instead of cloning, just copy repo contents (already provided as build context)
+COPY . /app
 
 # =====================================
 # Runtime stage (lightweight final img)
@@ -60,7 +61,7 @@ COPY --from=builder /app /app
 
 WORKDIR /app
 
-# ✅ Fixed path to requirements.txt
+# ✅ Correct requirements path
 RUN pip install --no-cache-dir -r docker/requirements.txt
 
 # Environment defaults
