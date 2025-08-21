@@ -1,93 +1,73 @@
-# Use the build args QSV=1 to build with intel drivers.
+# ================================
+# Dockerfile for Wyze Bridge + QSV
+# ================================
+
+# Build arguments
 ARG BUILD
 ARG BUILD_DATE
 ARG GITHUB_SHA
-ARG QSV
+ARG QSV=""
+
+# Base image
 FROM amd64/python:3.13-slim-bookworm AS base
 
+# ==================================================
+# Builder stage (compile ffmpeg, deps, and app code)
+# ==================================================
 FROM base AS builder
 ARG BUILD_DATE
-ARG QSV
+ARG QSV=""
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    set -eux; \
-    if [ -n "$QSV" ]; then \
-        echo 'deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware' >/etc/apt/sources.list.d/debian-testing.list; \
-    fi; \
+RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         build-essential \
         curl \
         gcc \
-        libffi-dev \
+        git \
+        yasm \
+        nasm \
+        pkg-config \
+        libx264-dev \
+        libx265-dev \
+        libvpx-dev \
+        libmp3lame-dev \
+        libopus-dev \
+        libdrm-dev \
+        libva-dev \
         tar \
-        xz-utils; \
-    if [ -n "$QSV" ]; then \
-        apt-get install -y i965-va-driver intel-media-va-driver-non-free libmfx1 libva-drm2; \
-        apt-get install -y i965-va-driver-shaders; \
-    fi; \        
+        xz-utils \
+        libffi-dev; \
+    if [ -n "${QSV:-}" ]; then \
+        apt-get install -y \
+            i965-va-driver \
+            intel-media-va-driver \
+            libmfx1 \
+            libva-drm2; \
+    fi; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
-COPY /app/ /build/app/
-
-RUN chmod +x /build/app/run
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    set -eux; pip3 install --disable-pip-version-check --prefix=/build/usr/local -r /build/app/requirements.txt
-
-RUN set -eux; \
-    echo "BUILDING IMAGE FOR amd64";\
-    TARGETARCH=amd64; FFMPEG_ARCH=x86_64; MTX_ARCH=amd64; \
-    cd /build; \
-    . app/.env; \
-    mkdir -p tokens ${QSV:+usr/lib}; \
-    curl -SL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n6.1-latest-linux64-lgpl-6.1.tar.xz -o ffmpeg.tar.xz; \
-    tar -Jxf ffmpeg.tar.xz --strip-components=1 -C usr/local --wildcards '*ffmpeg'; \
-    rm ffmpeg.tar.xz; \
-    curl -fsSL https://github.com/bluenviron/mediamtx/releases/download/v${MTX_TAG}/mediamtx_v${MTX_TAG}_linux_${MTX_ARCH}.tar.gz -o mediamtx.tar.gz; \
-    tar tzf mediamtx.tar.gz || (echo "Invalid mediamtx tarball for ${MTX_ARCH}" && exit 1); \
-    tar xzf mediamtx.tar.gz -C app; \
-    rm mediamtx.tar.gz; \
-    cp app/lib/lib.${TARGETARCH} usr/local/lib/libIOTCAPIs_ALL.so; \
-    if [ -n "$QSV" ]; \
-        then cp -R /usr/lib/x86_64-linux-gnu/ usr/lib/; \
-    fi; \
-    rm -rf app/*.txt app/lib/; \
-    if [ -z "${BUILD_DATE}" ]; \
-        then echo BUILD_DATE=$(date) > .build_date; \
-        else echo BUILD_DATE=${BUILD_DATE} > .build_date; \
-    fi;
-
-FROM base
-ARG BUILD
-ARG GITHUB_SHA
-ARG BUILD_DATE
-ARG BUILD_VERSION
-ARG QSV
-
-RUN set -eux; \
-    rm /var/log/*.log ; \
-    rm -rf /var/log/apt ;
-
-COPY --from=builder /build /
-
-ENV PYTHONUNBUFFERED=1 FLASK_APP=frontend BUILD=$BUILD BUILD_VERSION=$BUILD_VERSION BUILD_DATE=$BUILD_DATE GITHUB_SHA=$GITHUB_SHA FLASK_ENV=production FLASK_DEBUG=0
 WORKDIR /app
-ENTRYPOINT [ "/app/run" ]
+RUN git clone https://github.com/appstatefan01/docker-wyze-bridge.git /app
 
-LABEL \
-    io.hass.name="Docker Wyze Bridge for Home Assistant HARDWARE QSV:${QSV}" \
-    io.hass.description="Bridges Wyze Cameras into Home Assistant using MediaMTX in Docker container" \
-    io.hass.type="addon" \
-    io.hass.version=${BUILD_VERSION} \
-    maintainer="Marc Brooks <idisposable@gmail.com>" \
-    org.label-schema.name="Docker Wyze Bridge HA" \
-    org.label-schema.description="Docker Wyze Bridge for Home Assistant" \
-    org.label-schema.build-date=${BUILD_DATE} \
-    org.label-schema.schema-version="1.0" \
-    org.label-schema.usage="https://github.com/IDisposable/docker-wyze-bridge/blob/main/README.md" \
-    org.label-schema.vcs-ref=${GITHUB_SHA} \
-    org.label-schema.vcs-url="https://github.com/IDisposable/docker-wyze-bridge/" \
-    org.label-schema.vendor="HomeAssistant add-ons by Marc Brooks"
+# =====================================
+# Runtime stage (lightweight final img)
+# =====================================
+FROM base AS runtime
+COPY --from=builder /usr /usr
+COPY --from=builder /app /app
+
+WORKDIR /app
+
+# ✅ Fixed path to requirements.txt
+RUN pip install --no-cache-dir -r docker/requirements.txt
+
+# Environment defaults
+ENV WYZE_EMAIL="your@email.com" \
+    WYZE_PASSWORD="yourpassword" \
+    NET_MODE="LAN" \
+    RECORD_ALL="false"
+
+# Start Wyze Bridge
+CMD ["python", "wyze_bridge.py"]
